@@ -1,6 +1,3 @@
-# Export-VisualLogicBacnetObjects.ps1
-# Direct .vsdx XML parser. Does not use Visio COM.
-
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 
 function Safe-DeleteFolder {
@@ -30,6 +27,20 @@ function Decode-Text {
     return $t.Trim()
 }
 
+function Get-CellValue {
+    param(
+        [System.Xml.XmlElement]$Shape,
+        [string]$CellName
+    )
+
+    $cell = $Shape.SelectSingleNode("./*[local-name()='Cell'][@N='$CellName']")
+    if ($null -ne $cell) {
+        return $cell.GetAttribute("V")
+    }
+
+    return ""
+}
+
 function Get-BacnetObjects {
     param([string]$Text)
 
@@ -38,29 +49,56 @@ function Get-BacnetObjects {
 
     foreach ($m in $matches) {
         $obj = $m.Value.ToUpper()
+
         if ($obj -notmatch '-') {
             $obj = $obj -replace '^([A-Z]+)(\d+)$', '$1-$2'
         }
+
         $objects += $obj
     }
 
     return $objects | Select-Object -Unique
 }
 
-function Is-BadToken {
-    param([string]$Token)
+function Is-BadDescription {
+    param([string]$Value)
 
-    if ([string]::IsNullOrWhiteSpace($Token)) { return $true }
+    if ([string]::IsNullOrWhiteSpace($Value)) { return $true }
 
-    $x = $Token.Trim()
+    $v = $Value.Trim().ToUpper()
 
-    if ($x -match '^\d+(\.\d+)?$') { return $true }
-    if ($x -match '\b(AI|AO|AV|BI|BO|BV|MI|MO|MV)-?\d+\b') { return $true }
-    if ($x -match '^BR-\d+$') { return $true }
-    if ($x -match '^Inh$') { return $true }
-    if ($x -match '^Sheet\.\d+!') { return $true }
-    if ($x -match 'Width|Height|GUARD|PAR\(|PNT\(|_XFTRIGGER|User\.|#') { return $true }
-    if ($x.Length -lt 2) { return $true }
+    if ($v.Length -lt 2) { return $true }
+    if ($v -match '^\d+(\.\d+)?$') { return $true }
+    if ($v -match '^(AI|AO|AV|BI|BO|BV|MI|MO|MV)-?\d+$') { return $true }
+    if ($v -match '^BR-\d+$') { return $true }
+
+    $badWords = @(
+        "RGB",
+        "INH",
+        "WIDTH",
+        "HEIGHT",
+        "GUARD",
+        "PAR",
+        "PNT",
+        "USER",
+        "THEME",
+        "THEMEGUARD",
+        "COLOR",
+        "FILL",
+        "LINE",
+        "BEGINX",
+        "BEGINY",
+        "ENDX",
+        "ENDY",
+        "CONTROLS",
+        "GEOMETRY",
+        "CONNECTION",
+        "CONNECTIONS"
+    )
+
+    if ($badWords -contains $v) { return $true }
+    if ($v -match '^RGB[A-Z0-9_]*$') { return $true }
+    if ($v -match 'SHEET\.|WIDTH|HEIGHT|GUARD|PAR|PNT|XFTRIGGER|THEMEGUARD|RGB') { return $true }
 
     return $false
 }
@@ -70,7 +108,6 @@ function Get-BestDescriptionFromText {
 
     $clean = Decode-Text $Text
 
-    # Cut off obvious formula/value junk
     $clean = $clean -replace '\bInh\b.*$', ''
     $clean = $clean -replace 'Sheet\.\d+!.*$', ''
     $clean = $clean -replace 'GUARD\(.*$', ''
@@ -78,15 +115,19 @@ function Get-BestDescriptionFromText {
     $clean = $clean -replace 'PNT\(.*$', ''
     $clean = $clean -replace '_XFTRIGGER\(.*$', ''
 
-    $tokens = $clean -split '[\s,;:=]+'
+    $clean = $clean -replace '\b(AI|AO|AV|BI|BO|BV|MI|MO|MV)-?\d+\b', ' '
+    $clean = $clean -replace '\bBR-\d+\b', ' '
+
+    # Descriptions are single words, usually all caps, often with underscores.
+    $matches = [regex]::Matches($clean, '\b[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)*\b')
 
     $candidates = @()
 
-    foreach ($token in $tokens) {
-        $t = $token.Trim()
+    foreach ($m in $matches) {
+        $value = $m.Value.Trim().ToUpper()
 
-        if (-not (Is-BadToken $t)) {
-            $candidates += $t
+        if (-not (Is-BadDescription $value)) {
+            $candidates += $value
         }
     }
 
@@ -94,12 +135,9 @@ function Get-BestDescriptionFromText {
         return ""
     }
 
-    # Prefer labels like CHWR_TEMP, OAT, BYPASS_VALVE
     $best = $candidates |
         Sort-Object @{
-            Expression = {
-                if ($_ -match '_') { 0 } else { 1 }
-            }
+            Expression = { if ($_ -match '_') { 0 } else { 1 } }
             Ascending = $true
         }, @{
             Expression = { $_.Length }
@@ -120,7 +158,7 @@ function Get-ShapeSearchText {
         $parts += $textNode.InnerText
     }
 
-    # Use Cell V values only. Avoid F formulas.
+    # Use cell V values only. Do not use F formulas.
     $cells = $Shape.SelectNodes(".//*[local-name()='Cell']")
     foreach ($cell in $cells) {
         $v = $cell.GetAttribute("V")
@@ -225,8 +263,6 @@ foreach ($pageFile in $pageFiles) {
     }
 }
 
-# Choose one clean row per object.
-# Prefer rows with a real description.
 $finalPairs = $rawRecords |
     Group-Object Object |
     ForEach-Object {
@@ -279,8 +315,6 @@ foreach ($item in $finalPairs) {
     $writer.WriteStartElement("BacnetObject")
     $writer.WriteElementString("Object", $item.Object)
     $writer.WriteElementString("Description", $item.Description)
-    $writer.WriteElementString("Page", $item.Page)
-    $writer.WriteElementString("ShapeID", [string]$item.ShapeID)
     $writer.WriteEndElement()
 }
 
@@ -301,18 +335,14 @@ try {
 
     $worksheet.Cells.Item(1, 1) = "Object"
     $worksheet.Cells.Item(1, 2) = "Description"
-    $worksheet.Cells.Item(1, 3) = "Page"
-    $worksheet.Cells.Item(1, 4) = "Shape ID"
 
-    $worksheet.Range("A1:D1").Font.Bold = $true
+    $worksheet.Range("A1:B1").Font.Bold = $true
 
     $row = 2
 
     foreach ($item in $finalPairs) {
         $worksheet.Cells.Item($row, 1) = $item.Object
         $worksheet.Cells.Item($row, 2) = $item.Description
-        $worksheet.Cells.Item($row, 3) = $item.Page
-        $worksheet.Cells.Item($row, 4) = $item.ShapeID
         $row++
     }
 
@@ -332,7 +362,7 @@ catch {
     $csvPath = Join-Path $outputFolder "BacnetObjects_$timestamp.csv"
 
     $finalPairs |
-        Select-Object Object, Description, Page, ShapeID |
+        Select-Object Object, Description |
         Export-Csv -Path $csvPath -NoTypeInformation -Encoding UTF8
 
     Write-Host "CSV saved to: $csvPath" -ForegroundColor Green
