@@ -30,7 +30,7 @@ function Decode-Text {
 function Get-BacnetObjects {
     param([string]$Text)
 
-    $matches = [regex]::Matches($Text, '\b(AI|AO|AV|BI|BO|BV|MI|MO|MV)-?\d+\b', 'IgnoreCase')
+    $matches = [regex]::Matches($Text, '\b(AI|AO|AV|BI|BO|BV|MV)-?\d+\b', 'IgnoreCase')
     $objects = @()
 
     foreach ($m in $matches) {
@@ -55,7 +55,7 @@ function Is-BadDescription {
 
     if ($v.Length -lt 2) { return $true }
     if ($v -match '^\d+(\.\d+)?$') { return $true }
-    if ($v -match '^(AI|AO|AV|BI|BO|BV|MI|MO|MV)-?\d+$') { return $true }
+    if ($v -match '^(AI|AO|AV|BI|BO|BV|MV)-?\d+$') { return $true }
     if ($v -match '^BR-\d+$') { return $true }
 
     $badWords = @(
@@ -101,7 +101,7 @@ function Get-BestDescriptionFromText {
     $clean = $clean -replace 'PNT\(.*$', ''
     $clean = $clean -replace '_XFTRIGGER\(.*$', ''
 
-    $clean = $clean -replace '\b(AI|AO|AV|BI|BO|BV|MI|MO|MV)-?\d+\b', ' '
+    $clean = $clean -replace '\b(AI|AO|AV|BI|BO|BV|MV)-?\d+\b', ' '
     $clean = $clean -replace '\bBR-\d+\b', ' '
 
     $matches = [regex]::Matches($clean, '\b[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)*\b')
@@ -286,29 +286,71 @@ try {
     $excel.DisplayAlerts = $false
 
     $workbook = $excel.Workbooks.Add()
-    $worksheet = $workbook.Worksheets.Item(1)
-    $worksheet.Name = "BACnet Objects"
 
-    $worksheet.Cells.Item(1, 1) = "Object"
-    $worksheet.Cells.Item(1, 2) = "Description"
-
-    $worksheet.Range("A1:B1").Font.Bold = $true
-
-    $row = 2
-
-    foreach ($item in $finalPairs) {
-        $worksheet.Cells.Item($row, 1) = $item.Object
-        $worksheet.Cells.Item($row, 2) = $item.Description
-        $row++
+    while ($workbook.Worksheets.Count -gt 1) {
+        $workbook.Worksheets.Item($workbook.Worksheets.Count).Delete()
     }
 
-    $worksheet.UsedRange.Columns.AutoFit() | Out-Null
+    $defaultSheet = $workbook.Worksheets.Item(1)
+    $defaultSheet.Name = "TEMP"
+
+    $objectTypes = @("AI", "BI", "AV", "BV", "AO", "BO", "MV")
+    $createdSheets = 0
+
+    foreach ($objectType in $objectTypes) {
+        $itemsForType = $finalPairs | Where-Object {
+            $_.Object -match "^$objectType-"
+        } | Sort-Object {
+            if ($_.Object -match '^([A-Z]+)-(\d+)$') {
+                [int]$matches[2]
+            }
+            else {
+                999999
+            }
+        }
+
+        if ($itemsForType.Count -eq 0) {
+            continue
+        }
+
+        if ($createdSheets -eq 0) {
+            $worksheet = $defaultSheet
+            $worksheet.Name = $objectType
+        }
+        else {
+            $worksheet = $workbook.Worksheets.Add()
+            $worksheet.Name = $objectType
+        }
+
+        $worksheet.Cells.Item(1, 1) = "Object"
+        $worksheet.Cells.Item(1, 2) = "Description"
+
+        $worksheet.Range("A1:B1").Font.Bold = $true
+
+        $row = 2
+
+        foreach ($item in $itemsForType) {
+            $worksheet.Cells.Item($row, 1) = $item.Object
+            $worksheet.Cells.Item($row, 2) = $item.Description
+            $row++
+        }
+
+        $worksheet.UsedRange.Columns.AutoFit() | Out-Null
+        $createdSheets++
+    }
+
+    if ($createdSheets -eq 0) {
+        $defaultSheet.Name = "No Objects"
+        $defaultSheet.Cells.Item(1, 1) = "No BACnet objects found."
+        $defaultSheet.UsedRange.Columns.AutoFit() | Out-Null
+    }
+
     $workbook.SaveAs($excelPath, 51)
 
     $workbook.Close($true)
     $excel.Quit()
 
-    [System.Runtime.InteropServices.Marshal]::ReleaseComObject($worksheet) | Out-Null
+    [System.Runtime.InteropServices.Marshal]::ReleaseComObject($defaultSheet) | Out-Null
     [System.Runtime.InteropServices.Marshal]::ReleaseComObject($workbook) | Out-Null
     [System.Runtime.InteropServices.Marshal]::ReleaseComObject($excel) | Out-Null
 }
