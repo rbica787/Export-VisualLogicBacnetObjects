@@ -27,20 +27,6 @@ function Decode-Text {
     return $t.Trim()
 }
 
-function Get-CellValue {
-    param(
-        [System.Xml.XmlElement]$Shape,
-        [string]$CellName
-    )
-
-    $cell = $Shape.SelectSingleNode("./*[local-name()='Cell'][@N='$CellName']")
-    if ($null -ne $cell) {
-        return $cell.GetAttribute("V")
-    }
-
-    return ""
-}
-
 function Get-BacnetObjects {
     param([string]$Text)
 
@@ -118,7 +104,6 @@ function Get-BestDescriptionFromText {
     $clean = $clean -replace '\b(AI|AO|AV|BI|BO|BV|MI|MO|MV)-?\d+\b', ' '
     $clean = $clean -replace '\bBR-\d+\b', ' '
 
-    # Descriptions are single words, usually all caps, often with underscores.
     $matches = [regex]::Matches($clean, '\b[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)*\b')
 
     $candidates = @()
@@ -158,7 +143,6 @@ function Get-ShapeSearchText {
         $parts += $textNode.InnerText
     }
 
-    # Use cell V values only. Do not use F formulas.
     $cells = $Shape.SelectNodes(".//*[local-name()='Cell']")
     foreach ($cell in $cells) {
         $v = $cell.GetAttribute("V")
@@ -181,11 +165,13 @@ if (-not (Test-Path $vsdxPath)) {
     exit
 }
 
-$defaultOutputFolder = Join-Path ([System.IO.Path]::GetDirectoryName($vsdxPath)) "BacnetExport"
-$outputFolder = Read-Host "Enter output folder, or press Enter for $defaultOutputFolder"
+$visioFolder = [System.IO.Path]::GetDirectoryName($vsdxPath)
+$visioBaseName = [System.IO.Path]::GetFileNameWithoutExtension($vsdxPath)
+
+$outputFolder = Read-Host "Enter output folder, or press Enter to save in $visioFolder"
 
 if ([string]::IsNullOrWhiteSpace($outputFolder)) {
-    $outputFolder = $defaultOutputFolder
+    $outputFolder = $visioFolder
 }
 
 if (-not (Test-Path $outputFolder)) {
@@ -193,11 +179,10 @@ if (-not (Test-Path $outputFolder)) {
 }
 
 $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
-$tempFolder = Join-Path $env:TEMP "VisioBacnetExtract_$timestamp"
 
-$excelPath = Join-Path $outputFolder "BacnetObjects_$timestamp.xlsx"
-$xmlPath = Join-Path $outputFolder "BacnetObjects_$timestamp.xml"
-$diagPath = Join-Path $outputFolder "BacnetDiagnostic_$timestamp.txt"
+$excelPath = Join-Path $outputFolder "$visioBaseName Points $timestamp.xlsx"
+
+$tempFolder = Join-Path $env:TEMP "VisioBacnetExtract_$timestamp"
 
 Safe-DeleteFolder $tempFolder
 New-Item -ItemType Directory -Path $tempFolder | Out-Null
@@ -292,36 +277,7 @@ $finalPairs = $rawRecords |
         }
     }
 
-$rawRecords |
-    Sort-Object Object, Page, ShapeID |
-    ForEach-Object {
-        "Object: $($_.Object) | Description: $($_.Description) | Page: $($_.Page) | ShapeID: $($_.ShapeID) | RawText: $($_.RawText)"
-    } |
-    Set-Content -Path $diagPath -Encoding UTF8
-
 Write-Host ""
-Write-Host "Creating XML..." -ForegroundColor Cyan
-
-$settings = New-Object System.Xml.XmlWriterSettings
-$settings.Indent = $true
-$settings.Encoding = [System.Text.Encoding]::UTF8
-
-$writer = [System.Xml.XmlWriter]::Create($xmlPath, $settings)
-
-$writer.WriteStartDocument()
-$writer.WriteStartElement("BacnetObjects")
-
-foreach ($item in $finalPairs) {
-    $writer.WriteStartElement("BacnetObject")
-    $writer.WriteElementString("Object", $item.Object)
-    $writer.WriteElementString("Description", $item.Description)
-    $writer.WriteEndElement()
-}
-
-$writer.WriteEndElement()
-$writer.WriteEndDocument()
-$writer.Close()
-
 Write-Host "Creating Excel..." -ForegroundColor Cyan
 
 try {
@@ -357,15 +313,10 @@ try {
     [System.Runtime.InteropServices.Marshal]::ReleaseComObject($excel) | Out-Null
 }
 catch {
-    Write-Host "Excel failed. Creating CSV instead." -ForegroundColor Yellow
-
-    $csvPath = Join-Path $outputFolder "BacnetObjects_$timestamp.csv"
-
-    $finalPairs |
-        Select-Object Object, Description |
-        Export-Csv -Path $csvPath -NoTypeInformation -Encoding UTF8
-
-    Write-Host "CSV saved to: $csvPath" -ForegroundColor Green
+    Write-Host "Excel export failed." -ForegroundColor Red
+    Write-Host $_.Exception.Message
+    Safe-DeleteFolder $tempFolder
+    exit
 }
 
 Safe-DeleteFolder $tempFolder
@@ -374,5 +325,3 @@ Write-Host ""
 Write-Host "Export complete." -ForegroundColor Cyan
 Write-Host "Unique objects found: $($finalPairs.Count)"
 Write-Host "Excel saved to: $excelPath" -ForegroundColor Green
-Write-Host "XML saved to: $xmlPath" -ForegroundColor Green
-Write-Host "Diagnostic saved to: $diagPath" -ForegroundColor Green
